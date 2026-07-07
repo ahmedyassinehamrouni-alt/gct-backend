@@ -1,4 +1,3 @@
-// config/db.js — connexion MySQL via variables d'environnement Railway
 const mysql = require('mysql2');
 
 const pool = mysql.createPool({
