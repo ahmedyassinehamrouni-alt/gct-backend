@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+console.log('DB_HOST:', process.env.DB_HOST);
+console.log('DB_NAME:', process.env.DB_NAME);
 require('dotenv').config();
 
 const authRoutes = require('./routes/authRoutes');
