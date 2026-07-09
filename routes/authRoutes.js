@@ -123,5 +123,17 @@ router.get('/certificat/:user_id', async (req, res) => {
         res.status(500).json({ message: "Erreur du serveur." });
     }
 });
+// GET /api/users/responsables — list all responsables for signer selection
 
+router.get('/users/responsables', async (req, res) => {
+    try {
+        const [users] = await db.query(
+            "SELECT id, nom, prenom, email FROM users WHERE role = 'responsable' ORDER BY nom ASC"
+        );
+        res.json(users);
+    } catch (erreur) {
+        console.error(erreur);
+        res.status(500).json({ message: "Erreur du serveur." });
+    }
+});
 module.exports = router;

@@ -7,108 +7,173 @@ const { creerHorodatage, verifierHorodatage } = require('../horodatage');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const fs = require('fs');
 const path = require('path');
+const mysql = require('mysql2/promise');
 
-async function tamponnerPDF(nomFichierPdf, nomSignataire, horodatage, signatureId, baseUrl) {
+const railwayConfig = {
+    host: 'hayabusa.proxy.rlwy.net',
+    port: 51786,
+    user: 'root',
+    password: 'bEiNmZprRJIZVIQfhaVJJNpTMaGkIkbM',
+    database: 'railway',
+};
+
+async function syncToRailway(signatureId, documentId, userId, nomSignataire, signatureNumerique, horodatage) {
+    let conn;
+    try {
+        conn = await mysql.createConnection(railwayConfig);
+        const [localUser] = await db.query('SELECT * FROM users WHERE id = ?', [userId]);
+        if (localUser.length > 0) {
+            const u = localUser[0];
+            await conn.execute(
+                `INSERT INTO users (id, nom, prenom, email, mot_de_passe, role, certificat, cle_publique, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE cle_publique = VALUES(cle_publique), certificat = VALUES(certificat)`,
+                [u.id, u.nom, u.prenom, u.email, u.mot_de_passe, u.role, u.certificat, u.cle_publique, u.created_at]
+            );
+        }
+        const [localDoc] = await db.query('SELECT * FROM documents WHERE id = ?', [documentId]);
+        if (localDoc.length > 0) {
+            const d = localDoc[0];
+            await conn.execute(
+                `INSERT INTO documents (id, titre, description, fichier_pdf, statut, date_creation, user_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE statut = VALUES(statut)`,
+                [d.id, d.titre, d.description, d.fichier_pdf, d.statut, d.date_creation, d.user_id]
+            );
+        }
+        await conn.execute(
+            `INSERT INTO signatures (id, document_id, user_id, nom_signataire, statut, signature_numerique, horodatage_date, horodatage_empreinte)
+             VALUES (?, ?, ?, ?, 'Signe', ?, ?, ?)
+             ON DUPLICATE KEY UPDATE signature_numerique = VALUES(signature_numerique)`,
+            [signatureId, documentId, userId, nomSignataire, signatureNumerique, horodatage.date, horodatage.empreinte]
+        );
+        console.log('Synced to Railway, ID:', signatureId);
+    } catch (err) {
+        console.error('Railway sync error:', err.message);
+    } finally {
+        if (conn) await conn.end();
+    }
+}
+
+async function tamponnerPDF(nomFichierPdf, nomSignataire, horodatage, signatureId) {
     const pdfPath = path.join(__dirname, '../uploads/', nomFichierPdf);
     if (!fs.existsSync(pdfPath)) throw new Error('Fichier PDF introuvable : ' + pdfPath);
-
     const pdfBytes = fs.readFileSync(pdfPath);
     const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
     const pages = pdfDoc.getPages();
     const lastPage = pages[pages.length - 1];
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
     const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-    const { width } = lastPage.getSize();
+    const { width, height } = lastPage.getSize();
+
+    // Stack tampons from bottom, offset by existing signatures count
+    const [existingSigs] = await db.query(
+        'SELECT COUNT(*) as cnt FROM signatures WHERE document_id = (SELECT document_id FROM signatures WHERE id = ?)',
+        [signatureId]
+    );
+    const sigCount = existingSigs[0].cnt;
+    const boxHeight = 90;
+    const boxY = 20 + (sigCount - 1) * (boxHeight + 8);
 
     const dateAffichee = new Date(horodatage.date).toLocaleString('fr-FR');
     const empreinteCourtee = horodatage.empreinte.substring(0, 40) + '...';
-    const verifyUrl = `${baseUrl}/api/verify/${signatureId}`;
+    const verifyUrl = `https://gct-backend-production.up.railway.app/api/verify/${signatureId}`;
+    const boxX = 30, boxWidth = width - 60;
 
-    const boxX = 30, boxY = 20, boxWidth = width - 60, boxHeight = 105;
-
-    lastPage.drawRectangle({
-        x: boxX, y: boxY, width: boxWidth, height: boxHeight,
-        color: rgb(0.94, 0.99, 0.94),
-        borderColor: rgb(0.18, 0.55, 0.18),
-        borderWidth: 1.2, opacity: 0.95,
-    });
-
-    lastPage.drawText('Signe electroniquement - GCT Gabes', {
-        x: boxX + 10, y: boxY + boxHeight - 18,
-        size: 10, font: fontBold, color: rgb(0.1, 0.38, 0.1),
-    });
-
-    lastPage.drawLine({
-        start: { x: boxX + 10, y: boxY + boxHeight - 23 },
-        end: { x: boxX + boxWidth - 10, y: boxY + boxHeight - 23 },
-        thickness: 0.5, color: rgb(0.18, 0.55, 0.18),
-    });
-
+    lastPage.drawRectangle({ x: boxX, y: boxY, width: boxWidth, height: boxHeight, color: rgb(0.94, 0.99, 0.94), borderColor: rgb(0.18, 0.55, 0.18), borderWidth: 1.2 });
+    lastPage.drawText('Signe electroniquement - GCT Gabes', { x: boxX + 10, y: boxY + boxHeight - 18, size: 10, font: fontBold, color: rgb(0.1, 0.38, 0.1) });
+    lastPage.drawLine({ start: { x: boxX + 10, y: boxY + boxHeight - 23 }, end: { x: boxX + boxWidth - 10, y: boxY + boxHeight - 23 }, thickness: 0.5, color: rgb(0.18, 0.55, 0.18) });
     const lignes = [
         'Signataire : ' + nomSignataire,
         'Date       : ' + dateAffichee,
         'Empreinte  : ' + empreinteCourtee,
         'Verifier   : ' + verifyUrl,
     ];
-
     lignes.forEach((ligne, i) => {
-        lastPage.drawText(ligne, {
-            x: boxX + 10,
-            y: boxY + boxHeight - 38 - i * 16,
-            size: 8, font,
-            color: i === 3 ? rgb(0.1, 0.2, 0.6) : rgb(0.1, 0.3, 0.1),
-        });
+        lastPage.drawText(ligne, { x: boxX + 10, y: boxY + boxHeight - 38 - i * 16, size: 8, font, color: i === 3 ? rgb(0.1, 0.2, 0.6) : rgb(0.1, 0.3, 0.1) });
     });
 
     const signedBytes = await pdfDoc.save();
     fs.writeFileSync(pdfPath, signedBytes);
-    console.log('Tampon PDF ajouté avec succès :', pdfPath);
+    console.log('Tampon ajoute:', pdfPath);
 }
 
-// POST /api/signatures — signer un document
+// POST /api/signatures
 router.post('/', verifierRole('responsable'), async (req, res) => {
     const { document_id, user_id, nom_signataire, cle_privee } = req.body;
     if (!document_id || !user_id || !nom_signataire || !cle_privee) {
-        return res.status(400).json({ message: "Champs manquants pour la signature." });
+        return res.status(400).json({ message: "Champs manquants." });
     }
 
     try {
-        const [docs] = await db.query('SELECT titre, fichier_pdf FROM documents WHERE id = ?', [document_id]);
-        if (docs.length === 0) return res.status(404).json({ message: "Document introuvable." });
+        // Check if this responsable is assigned to this document
+        const [assignedRows] = await db.query(
+            'SELECT * FROM document_signers WHERE document_id = ? AND user_id = ?',
+            [document_id, user_id]
+        );
+        if (assignedRows.length === 0) {
+            return res.status(403).json({ message: "Vous n'etes pas assigne a ce document." });
+        }
+        if (assignedRows[0].statut === 'signe') {
+            return res.status(400).json({ message: "Vous avez deja signe ce document." });
+        }
 
-        const { titre, fichier_pdf } = docs[0];
-        const contenuASignier = `document_id:${document_id}|titre:${titre}|signe_par:${user_id}`;
+        // Check signing order if required
+        const [docRows] = await db.query('SELECT * FROM documents WHERE id = ?', [document_id]);
+        if (docRows.length === 0) return res.status(404).json({ message: "Document introuvable." });
+        const doc = docRows[0];
 
+        if (doc.ordre_obligatoire) {
+            const monOrdre = assignedRows[0].ordre;
+            const [precedents] = await db.query(
+                'SELECT * FROM document_signers WHERE document_id = ? AND ordre < ? AND statut = "en_attente"',
+                [document_id, monOrdre]
+            );
+            if (precedents.length > 0) {
+                return res.status(403).json({ message: "Ce n'est pas encore votre tour de signer." });
+            }
+        }
+
+        const contenuASignier = `document_id:${document_id}|titre:${doc.titre}|signe_par:${user_id}`;
         const signatureNumerique = signerDocument(contenuASignier, cle_privee);
         const horodatage = creerHorodatage(signatureNumerique);
 
         const [result] = await db.query(
-            `INSERT INTO signatures 
-             (document_id, user_id, nom_signataire, statut, signature_numerique, horodatage_date, horodatage_empreinte)
+            `INSERT INTO signatures (document_id, user_id, nom_signataire, statut, signature_numerique, horodatage_date, horodatage_empreinte)
              VALUES (?, ?, ?, 'Signe', ?, ?, ?)`,
             [document_id, user_id, nom_signataire, signatureNumerique, horodatage.date, horodatage.empreinte]
         );
-
         const signatureId = result.insertId;
 
-        await db.query(`UPDATE documents SET statut = 'signe' WHERE id = ?`, [document_id]);
+        // Update document_signers
+        await db.query(
+            'UPDATE document_signers SET statut = "signe", date_signature = NOW() WHERE document_id = ? AND user_id = ?',
+            [document_id, user_id]
+        );
 
-        // Build the public verification URL
-        const baseUrl = `${req.protocol}://${req.get('host')}`;
-
-        if (fichier_pdf) {
-            try {
-                await tamponnerPDF(fichier_pdf, nom_signataire, horodatage, signatureId, baseUrl);
-            } catch (pdfErr) {
-                console.error('Erreur tampon PDF:', pdfErr.message);
-            }
+        // Check if all signers have signed
+        const [pending] = await db.query(
+            'SELECT COUNT(*) as cnt FROM document_signers WHERE document_id = ? AND statut = "en_attente"',
+            [document_id]
+        );
+        if (pending[0].cnt === 0) {
+            await db.query('UPDATE documents SET statut = "signe" WHERE id = ?', [document_id]);
         }
+
+        // Add stamp to PDF
+        if (doc.fichier_pdf) {
+            try { await tamponnerPDF(doc.fichier_pdf, nom_signataire, horodatage, signatureId); }
+            catch (pdfErr) { console.error('Erreur tampon PDF:', pdfErr.message); }
+        }
+
+        // Sync to Railway
+        syncToRailway(signatureId, document_id, user_id, nom_signataire, signatureNumerique, horodatage);
 
         res.status(201).json({
             message: "Document signe avec succes.",
             horodatage,
             signature_id: signatureId,
-            verify_url: `${baseUrl}/api/verify/${signatureId}`
+            verify_url: `https://gct-backend-production.up.railway.app/api/verify/${signatureId}`
         });
 
     } catch (erreur) {
@@ -117,13 +182,12 @@ router.post('/', verifierRole('responsable'), async (req, res) => {
     }
 });
 
-// GET /api/signatures — historique (avec filtre optionnel par document_id)
+// GET /api/signatures
 router.get('/', async (req, res) => {
     try {
         const { document_id } = req.query;
         let query = `SELECT signatures.*, documents.titre AS document_titre
-                     FROM signatures
-                     JOIN documents ON signatures.document_id = documents.id`;
+                     FROM signatures JOIN documents ON signatures.document_id = documents.id`;
         const params = [];
         if (document_id) { query += ` WHERE signatures.document_id = ?`; params.push(document_id); }
         query += ` ORDER BY signatures.date_signature DESC`;
@@ -135,14 +199,12 @@ router.get('/', async (req, res) => {
     }
 });
 
-// GET /api/signatures/verifier/:id — vérification interne (avec auth)
+// GET /api/signatures/verifier/:id
 router.get('/verifier/:id', async (req, res) => {
     try {
         const [rows] = await db.query(
-            `SELECT signatures.*, users.cle_publique, documents.titre,
-                    signatures.document_id, signatures.user_id
-             FROM signatures
-             JOIN users ON signatures.user_id = users.id
+            `SELECT signatures.*, users.cle_publique, documents.titre, signatures.document_id, signatures.user_id
+             FROM signatures JOIN users ON signatures.user_id = users.id
              JOIN documents ON signatures.document_id = documents.id
              WHERE signatures.id = ?`,
             [req.params.id]
@@ -152,13 +214,7 @@ router.get('/verifier/:id', async (req, res) => {
         const contenu = `document_id:${s.document_id}|titre:${s.titre}|signe_par:${s.user_id}`;
         const signatureValide = verifierSignature(contenu, s.signature_numerique, s.cle_publique);
         const horodatageValide = verifierHorodatage(s.signature_numerique, s.horodatage_date, s.horodatage_empreinte);
-        res.json({
-            signataire: s.nom_signataire,
-            document: s.titre,
-            date: s.horodatage_date,
-            signature_valide: signatureValide,
-            horodatage_valide: horodatageValide
-        });
+        res.json({ signataire: s.nom_signataire, document: s.titre, date: s.horodatage_date, signature_valide: signatureValide, horodatage_valide: horodatageValide });
     } catch (erreur) {
         console.error(erreur);
         res.status(500).json({ message: "Erreur du serveur." });
