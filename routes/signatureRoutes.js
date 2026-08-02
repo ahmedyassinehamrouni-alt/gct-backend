@@ -184,6 +184,49 @@ router.post('/', verifierRole('responsable'), async (req, res) => {
     }
 });
 
+// POST /api/signatures/refuser
+router.post('/refuser', verifierRole('responsable'), async (req, res) => {
+    const { document_id, user_id, motif } = req.body;
+    if (!document_id || !user_id || !motif || !motif.trim()) {
+        return res.status(400).json({ message: "Le motif du refus est obligatoire." });
+    }
+
+    try {
+        const [assignedRows] = await db.query(
+            'SELECT * FROM document_signers WHERE document_id = ? AND user_id = ?',
+            [document_id, user_id]
+        );
+        if (assignedRows.length === 0) return res.status(403).json({ message: "Vous n'etes pas assigne a ce document." });
+        if (assignedRows[0].statut === 'signe') return res.status(400).json({ message: "Vous avez deja signe ce document." });
+        if (assignedRows[0].statut === 'refuse') return res.status(400).json({ message: "Vous avez deja refuse ce document." });
+
+        const [docRows] = await db.query('SELECT * FROM documents WHERE id = ?', [document_id]);
+        if (docRows.length === 0) return res.status(404).json({ message: "Document introuvable." });
+        const doc = docRows[0];
+
+        if (doc.ordre_obligatoire) {
+            const monOrdre = assignedRows[0].ordre;
+            const [precedents] = await db.query(
+                'SELECT * FROM document_signers WHERE document_id = ? AND ordre < ? AND statut = "en_attente"',
+                [document_id, monOrdre]
+            );
+            if (precedents.length > 0) return res.status(403).json({ message: "Ce n'est pas encore votre tour." });
+        }
+
+        await db.query(
+            'UPDATE document_signers SET statut = "refuse", motif_refus = ?, date_refus = NOW() WHERE document_id = ? AND user_id = ?',
+            [motif.trim(), document_id, user_id]
+        );
+        // Un refus bloque le circuit : le document repasse au statut "refuse"
+        await db.query('UPDATE documents SET statut = "refuse" WHERE id = ?', [document_id]);
+
+        res.status(200).json({ message: "Document refuse." });
+    } catch (erreur) {
+        console.error('Erreur refus:', erreur);
+        res.status(500).json({ message: "Erreur : " + erreur.message });
+    }
+});
+
 // GET /api/signatures
 router.get('/', async (req, res) => {
     try {

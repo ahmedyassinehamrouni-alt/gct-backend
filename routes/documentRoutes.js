@@ -94,4 +94,39 @@ router.get('/:id/signers', async (req, res) => {
     }
 });
 
+// GET /api/documents/:id/comments
+router.get('/:id/comments', async (req, res) => {
+    try {
+        const [comments] = await db.query(
+            'SELECT * FROM document_comments WHERE document_id = ? ORDER BY created_at ASC',
+            [req.params.id]
+        );
+        res.json(comments);
+    } catch (erreur) {
+        console.error(erreur);
+        res.status(500).json({ message: "Erreur du serveur." });
+    }
+});
+
+// POST /api/documents/:id/comments
+router.post('/:id/comments', async (req, res) => {
+    const { user_id, nom_auteur, contenu } = req.body;
+    if (!user_id || !nom_auteur || !contenu || !contenu.trim()) {
+        return res.status(400).json({ message: "Le commentaire ne peut pas etre vide." });
+    }
+    try {
+        const [docRows] = await db.query('SELECT id FROM documents WHERE id = ?', [req.params.id]);
+        if (docRows.length === 0) return res.status(404).json({ message: "Document introuvable." });
+
+        const [resultat] = await db.query(
+            'INSERT INTO document_comments (document_id, user_id, nom_auteur, contenu) VALUES (?, ?, ?, ?)',
+            [req.params.id, user_id, nom_auteur, contenu.trim()]
+        );
+        res.status(201).json({ message: "Commentaire ajoute.", id: resultat.insertId });
+    } catch (erreur) {
+        console.error(erreur);
+        res.status(500).json({ message: "Erreur du serveur." });
+    }
+});
+
 module.exports = router;
