@@ -64,7 +64,7 @@ router.get('/', async (req, res) => {
 
         if (filtre === 'waiting_on_me') {
             if (!user_id) return res.status(400).json({ message: "user_id requis pour ce filtre." });
-            sql = `SELECT DISTINCT documents.*, users.nom AS auteur_nom, users.prenom AS auteur_prenom
+            sql = `SELECT DISTINCT documents.*, users.nom AS auteur_nom, users.prenom AS auteur_prenom, users.poste AS auteur_poste, users.departement AS auteur_departement
                    FROM documents
                    JOIN users ON documents.user_id = users.id
                    JOIN document_signers ds ON ds.document_id = documents.id
@@ -78,7 +78,7 @@ router.get('/', async (req, res) => {
                    )`;
             params.push(user_id);
         } else {
-            sql = `SELECT documents.*, users.nom AS auteur_nom, users.prenom AS auteur_prenom
+            sql = `SELECT documents.*, users.nom AS auteur_nom, users.prenom AS auteur_prenom, users.poste AS auteur_poste, users.departement AS auteur_departement
                    FROM documents JOIN users ON documents.user_id = users.id WHERE 1=1`;
 
             if (filtre === 'created_by_me') {
@@ -123,7 +123,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
     try {
         const [resultats] = await db.query(
-            `SELECT documents.*, users.nom AS auteur_nom, users.prenom AS auteur_prenom, users.departement AS auteur_departement
+            `SELECT documents.*, users.nom AS auteur_nom, users.prenom AS auteur_prenom, users.poste AS auteur_poste, users.departement AS auteur_departement
              FROM documents JOIN users ON documents.user_id = users.id
              WHERE documents.id = ?`,
             [req.params.id]
@@ -140,7 +140,7 @@ router.get('/:id', async (req, res) => {
 router.get('/:id/signers', async (req, res) => {
     try {
         const [signers] = await db.query(
-            `SELECT document_signers.*, users.nom, users.prenom
+            `SELECT document_signers.*, users.nom, users.prenom, users.poste, users.departement
              FROM document_signers
              JOIN users ON document_signers.user_id = users.id
              WHERE document_signers.document_id = ?
