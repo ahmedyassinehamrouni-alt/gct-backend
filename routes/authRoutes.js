@@ -1,5 +1,6 @@
 // Ce fichier gère la connexion des utilisateurs.
-// À la première connexion, on génère un certificat numérique pour le responsable.
+// À la première connexion, on génère un certificat numérique pour l'utilisateur
+// (n'importe quel role_app peut désormais signer, donc n'importe qui a besoin d'un certificat).
 
 const express = require('express');
 const router = express.Router();
@@ -24,19 +25,21 @@ router.post('/login', async (req, res) => {
 
         const utilisateur = resultats[0];
 
-        // Vérification du mot de passe (texte en clair)
         if (mot_de_passe !== utilisateur.mot_de_passe) {
             return res.status(401).json({ message: "Email ou mot de passe incorrect." });
         }
 
-        // Si le responsable n'a pas encore de certificat, on en génère un maintenant
+        if (utilisateur.actif === 0) {
+            return res.status(403).json({ message: "Ce compte a ete desactive. Contactez un administrateur." });
+        }
+
+        // Si l'utilisateur n'a pas encore de certificat, on en génère un maintenant
+        // (tous les role_app peuvent signer, donc tous ont besoin d'un certificat)
         let clePrivee = null;
-        if (utilisateur.role === 'responsable' && !utilisateur.certificat) {
+        if (!utilisateur.certificat) {
             const nomComplet = utilisateur.prenom + ' ' + utilisateur.nom;
             const resultatPki = genererCertificat(nomComplet, email);
 
-            // On sauvegarde le certificat et la clé publique en base
-            // La clé privée est renvoyée UNE SEULE FOIS au responsable (jamais stockée)
             await db.query(
                 'UPDATE users SET certificat = ?, cle_publique = ? WHERE id = ?',
                 [resultatPki.certificat, resultatPki.clePublique, utilisateur.id]
@@ -51,8 +54,11 @@ router.post('/login', async (req, res) => {
             prenom: utilisateur.prenom,
             email: utilisateur.email,
             role: utilisateur.role,
+            role_app: utilisateur.role_app,
+            poste: utilisateur.poste,
+            departement: utilisateur.departement,
             certificat: utilisateur.certificat || null,
-            cle_privee: clePrivee // null si déjà généré avant
+            cle_privee: clePrivee
         });
 
     } catch (erreur) {
@@ -61,34 +67,7 @@ router.post('/login', async (req, res) => {
     }
 });
 
-// ===== Route : POST /api/register =====
-// Créer un compte (mot de passe hashé avec bcrypt)
-router.post('/register', async (req, res) => {
-    const { nom, prenom, email, mot_de_passe, role } = req.body;
-
-    if (!nom || !prenom || !email || !mot_de_passe || !role) {
-        return res.status(400).json({ message: "Tous les champs sont obligatoires." });
-    }
-
-    try {
-        await db.query(
-            'INSERT INTO users (nom, prenom, email, mot_de_passe, role) VALUES (?, ?, ?, ?, ?)',
-            [nom, prenom, email, mot_de_passe, role]
-        );
-
-        res.status(201).json({ message: "Compte créé avec succès." });
-
-    } catch (erreur) {
-        if (erreur.code === 'ER_DUP_ENTRY') {
-            return res.status(400).json({ message: "Cet email est déjà utilisé." });
-        }
-        console.error(erreur);
-        res.status(500).json({ message: "Erreur du serveur." });
-    }
-});
-
 // ===== Route : GET /api/certificat/:user_id =====
-// Lire et décoder le certificat d'un utilisateur (lecture seule, pas de secret exposé).
 router.get('/certificat/:user_id', async (req, res) => {
     try {
         const [resultats] = await db.query(
@@ -102,7 +81,6 @@ router.get('/certificat/:user_id', async (req, res) => {
 
         const cert = forge.pki.certificateFromPem(resultats[0].certificat);
 
-        // On extrait les infos lisibles du certificat
         const sujet = {};
         cert.subject.attributes.forEach(attr => { sujet[attr.shortName] = attr.value; });
 
@@ -123,12 +101,12 @@ router.get('/certificat/:user_id', async (req, res) => {
         res.status(500).json({ message: "Erreur du serveur." });
     }
 });
-// GET /api/users/responsables — list all responsables for signer selection
 
+// GET /api/users/responsables — conserve pour compatibilite (anciens appels), retourne chef+admin
 router.get('/users/responsables', async (req, res) => {
     try {
         const [users] = await db.query(
-            "SELECT id, nom, prenom, email FROM users WHERE role = 'responsable' ORDER BY nom ASC"
+            "SELECT id, nom, prenom, email FROM users WHERE role_app IN ('chef','admin') AND actif = 1 ORDER BY nom ASC"
         );
         res.json(users);
     } catch (erreur) {
@@ -136,11 +114,26 @@ router.get('/users/responsables', async (req, res) => {
         res.status(500).json({ message: "Erreur du serveur." });
     }
 });
-// GET /api/users — liste de tous les utilisateurs (pour le filtre "auteur")
+
+// GET /api/users/signataires — tous les utilisateurs actifs, utilisable comme signataire
+// (n'importe qui peut signer tant qu'il est assigne)
+router.get('/users/signataires', async (req, res) => {
+    try {
+        const [users] = await db.query(
+            "SELECT id, nom, prenom, email, poste, departement, role_app FROM users WHERE actif = 1 ORDER BY nom ASC"
+        );
+        res.json(users);
+    } catch (erreur) {
+        console.error(erreur);
+        res.status(500).json({ message: "Erreur du serveur." });
+    }
+});
+
+// GET /api/users — liste de tous les utilisateurs actifs (pour le filtre "auteur")
 router.get('/users', async (req, res) => {
     try {
         const [users] = await db.query(
-            "SELECT id, nom, prenom, role FROM users ORDER BY nom ASC"
+            "SELECT id, nom, prenom, role_app, poste, departement FROM users WHERE actif = 1 ORDER BY nom ASC"
         );
         res.json(users);
     } catch (erreur) {

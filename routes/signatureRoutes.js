@@ -1,7 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../config/db');
-const verifierRole = require('../middleware/auth');
+// Signer/refuser un document ne depend plus du role : n'importe quel utilisateur
+// assigne (document_signers) peut agir, quel que soit agent/chef/admin.
+// verifierRole n'est plus utilise ici (garde en commentaire pour reference future).
 const { signerDocument, verifierSignature } = require('../pki');
 const { creerHorodatage, verifierHorodatage } = require('../horodatage');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
@@ -188,7 +190,7 @@ async function effectuerSignature(document_id, user_id, nom_signataire, cle_priv
 }
 
 // POST /api/signatures
-router.post('/', verifierRole('responsable'), async (req, res) => {
+router.post('/', async (req, res) => {
     const { document_id, user_id, nom_signataire, cle_privee } = req.body;
     if (!document_id || !user_id || !nom_signataire || !cle_privee) {
         return res.status(400).json({ message: "Champs manquants." });
@@ -205,7 +207,7 @@ router.post('/', verifierRole('responsable'), async (req, res) => {
 });
 
 // POST /api/signatures/bulk — signature groupee : signe plusieurs documents avec la meme cle privee
-router.post('/bulk', verifierRole('responsable'), async (req, res) => {
+router.post('/bulk', async (req, res) => {
     const { document_ids, user_id, nom_signataire, cle_privee } = req.body;
     if (!Array.isArray(document_ids) || document_ids.length === 0 || !user_id || !nom_signataire || !cle_privee) {
         return res.status(400).json({ message: "Champs manquants." });
@@ -229,7 +231,7 @@ router.post('/bulk', verifierRole('responsable'), async (req, res) => {
 });
 
 // POST /api/signatures/refuser
-router.post('/refuser', verifierRole('responsable'), async (req, res) => {
+router.post('/refuser', async (req, res) => {
     const { document_id, user_id, motif } = req.body;
     if (!document_id || !user_id || !motif || !motif.trim()) {
         return res.status(400).json({ message: "Le motif du refus est obligatoire." });

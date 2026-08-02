@@ -49,8 +49,14 @@ router.post('/', upload.single('fichier_pdf'), async (req, res) => {
 //   filtre=created_by_me  (necessite user_id) -> documents crees par user_id
 //   auteur_id      -> documents crees par un auteur precis
 //   date_debut / date_fin -> plage sur date_creation (format YYYY-MM-DD)
+//
+// Visibilite par defaut (quand filtre n'est pas waiting_on_me/created_by_me) :
+//   agent -> uniquement les documents qu'il a crees OU ou il est assigne comme signataire
+//   chef  -> tout son departement, + les documents ou il est cree/assigne (meme hors departement)
+//   admin -> tout, sans restriction
+// (necessite role_app + user_id ; departement necessaire pour le scope "chef")
 router.get('/', async (req, res) => {
-    const { recherche, filtre, user_id, auteur_id, date_debut, date_fin } = req.query;
+    const { recherche, filtre, user_id, auteur_id, date_debut, date_fin, role_app, departement } = req.query;
     try {
         let sql, params = [];
 
@@ -72,10 +78,29 @@ router.get('/', async (req, res) => {
         } else {
             sql = `SELECT documents.*, users.nom AS auteur_nom, users.prenom AS auteur_prenom
                    FROM documents JOIN users ON documents.user_id = users.id WHERE 1=1`;
+
             if (filtre === 'created_by_me') {
                 if (!user_id) return res.status(400).json({ message: "user_id requis pour ce filtre." });
                 sql += ' AND documents.user_id = ?'; params.push(user_id);
+            } else if (role_app === 'admin') {
+                // pas de restriction supplementaire : un admin voit tout
+            } else if (role_app === 'chef') {
+                if (!user_id) return res.status(400).json({ message: "user_id requis." });
+                sql += ` AND (
+                    users.departement <=> ?
+                    OR documents.user_id = ?
+                    OR EXISTS (SELECT 1 FROM document_signers ds3 WHERE ds3.document_id = documents.id AND ds3.user_id = ?)
+                )`;
+                params.push(departement || null, user_id, user_id);
+            } else if (role_app === 'agent') {
+                if (!user_id) return res.status(400).json({ message: "user_id requis." });
+                sql += ` AND (
+                    documents.user_id = ?
+                    OR EXISTS (SELECT 1 FROM document_signers ds3 WHERE ds3.document_id = documents.id AND ds3.user_id = ?)
+                )`;
+                params.push(user_id, user_id);
             }
+            // si role_app n'est pas fourni (ancien appel), pas de restriction — comportement historique conserve
         }
 
         if (recherche) { sql += ' AND documents.titre LIKE ?'; params.push('%' + recherche + '%'); }

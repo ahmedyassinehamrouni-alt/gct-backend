@@ -14,6 +14,7 @@ const authRoutes = require('./routes/authRoutes');
 const documentRoutes = require('./routes/documentRoutes');
 const signatureRoutes = require('./routes/signatureRoutes');
 const verifyRoute = require('./routes/verifyRoute');
+const adminRoutes = require('./routes/adminRoutes');
 
 const app = express();
 
@@ -24,6 +25,7 @@ app.use('/uploads', express.static('uploads'));
 app.use('/api', authRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/signatures', signatureRoutes);
+app.use('/api/admin', adminRoutes);
 
 // Route publique de vérification — sans authentification
 app.use('/api/verify', verifyRoute);
