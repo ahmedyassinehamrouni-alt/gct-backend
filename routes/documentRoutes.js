@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/db');
 const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
 
 const stockage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, 'uploads/'),
@@ -121,7 +123,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
     try {
         const [resultats] = await db.query(
-            `SELECT documents.*, users.nom AS auteur_nom, users.prenom AS auteur_prenom
+            `SELECT documents.*, users.nom AS auteur_nom, users.prenom AS auteur_prenom, users.departement AS auteur_departement
              FROM documents JOIN users ON documents.user_id = users.id
              WHERE documents.id = ?`,
             [req.params.id]
@@ -181,6 +183,52 @@ router.post('/:id/comments', async (req, res) => {
             [req.params.id, user_id, nom_auteur, contenu.trim()]
         );
         res.status(201).json({ message: "Commentaire ajoute.", id: resultat.insertId });
+    } catch (erreur) {
+        console.error(erreur);
+        res.status(500).json({ message: "Erreur du serveur." });
+    }
+});
+
+// DELETE /api/documents/:id
+// Autorise si le demandeur est : l'auteur du document, le chef du departement de l'auteur, ou un admin.
+// Identite du demandeur transmise en query : user_id, role_app, departement (meme pattern que GET /).
+router.delete('/:id', async (req, res) => {
+    const { user_id, role_app, departement } = req.query;
+    if (!user_id || !role_app) {
+        return res.status(400).json({ message: "user_id et role_app requis." });
+    }
+
+    try {
+        const [docRows] = await db.query(
+            `SELECT documents.*, users.departement AS auteur_departement
+             FROM documents JOIN users ON documents.user_id = users.id
+             WHERE documents.id = ?`,
+            [req.params.id]
+        );
+        if (docRows.length === 0) return res.status(404).json({ message: "Document introuvable." });
+        const doc = docRows[0];
+
+        const estAuteur = String(doc.user_id) === String(user_id);
+        const estAdmin = role_app === 'admin';
+        const estChefDuDepartement = role_app === 'chef' && departement && doc.auteur_departement && departement === doc.auteur_departement;
+
+        if (!estAuteur && !estAdmin && !estChefDuDepartement) {
+            return res.status(403).json({ message: "Vous n'avez pas le droit de supprimer ce document." });
+        }
+
+        // Supprimer les enregistrements lies (contraintes de cle etrangere)
+        await db.query('DELETE FROM signatures WHERE document_id = ?', [req.params.id]);
+        await db.query('DELETE FROM document_signers WHERE document_id = ?', [req.params.id]);
+        await db.query('DELETE FROM document_comments WHERE document_id = ?', [req.params.id]);
+        await db.query('DELETE FROM documents WHERE id = ?', [req.params.id]);
+
+        // Supprimer le fichier PDF physique (best-effort, ne bloque pas la reponse en cas d'echec)
+        if (doc.fichier_pdf) {
+            const pdfPath = path.join(__dirname, '../uploads/', doc.fichier_pdf);
+            fs.unlink(pdfPath, (err) => { if (err) console.error('Erreur suppression fichier PDF:', err.message); });
+        }
+
+        res.json({ message: "Document supprime avec succes." });
     } catch (erreur) {
         console.error(erreur);
         res.status(500).json({ message: "Erreur du serveur." });

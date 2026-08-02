@@ -7,6 +7,20 @@ const router = express.Router();
 const db = require('../config/db');
 const verifierRoleApp = require('../middleware/auth');
 
+// Liste fixe des departements — doit rester synchronisee avec DEPARTEMENTS dans
+// frontend/src/components/AdminUsers.js
+const DEPARTEMENTS_VALIDES = [
+    'Production',
+    'Maintenance',
+    'Informatique',
+    'Ressources Humaines',
+    'Finance & Comptabilite',
+    'Qualite, Securite & Environnement',
+    'Achats & Logistique',
+    'Laboratoire & R&D',
+    'Direction Generale',
+];
+
 // GET /api/admin/users — liste complete (y compris comptes desactives) pour le panneau admin
 router.get('/users', verifierRoleApp('admin'), async (req, res) => {
     try {
@@ -30,6 +44,9 @@ router.post('/users', verifierRoleApp('admin'), async (req, res) => {
     }
     if (!['agent', 'chef', 'admin'].includes(role_app)) {
         return res.status(400).json({ message: "Role invalide." });
+    }
+    if (departement && !DEPARTEMENTS_VALIDES.includes(departement)) {
+        return res.status(400).json({ message: "Departement invalide." });
     }
 
     try {
@@ -58,6 +75,9 @@ router.put('/users/:id', verifierRoleApp('admin'), async (req, res) => {
 
     if (role_app && !['agent', 'chef', 'admin'].includes(role_app)) {
         return res.status(400).json({ message: "Role invalide." });
+    }
+    if (departement && !DEPARTEMENTS_VALIDES.includes(departement)) {
+        return res.status(400).json({ message: "Departement invalide." });
     }
 
     try {
