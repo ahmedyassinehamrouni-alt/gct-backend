@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const mysql = require('mysql2/promise');
+const QRCode = require('qrcode');
 
 const railwayConfig = {
     host: 'hayabusa.proxy.rlwy.net',
@@ -100,9 +101,90 @@ async function tamponnerPDF(nomFichierPdf, nomSignataire, horodatage, signatureI
         lastPage.drawText(ligne, { x: boxX + 10, y: boxY + boxHeight - 38 - i * 16, size: 8, font, color: i === 3 ? rgb(0.1, 0.2, 0.6) : rgb(0.1, 0.3, 0.1) });
     });
 
+    // QR code pointant vers la page de verification publique — pratique pour une copie papier
+    try {
+        const qrDataUrl = await QRCode.toDataURL(verifyUrl, { margin: 0, width: 200, color: { dark: '#144d14', light: '#f0fdf4' } });
+        const qrPngBytes = Buffer.from(qrDataUrl.split(',')[1], 'base64');
+        const qrImage = await pdfDoc.embedPng(qrPngBytes);
+        const qrSize = boxHeight - 16;
+        lastPage.drawImage(qrImage, { x: boxX + boxWidth - qrSize - 10, y: boxY + 8, width: qrSize, height: qrSize });
+    } catch (qrErr) {
+        console.error('Erreur generation QR code:', qrErr.message);
+    }
+
     const signedBytes = await pdfDoc.save();
     fs.writeFileSync(pdfPath, signedBytes);
     console.log('Tampon ajoute:', pdfPath);
+}
+
+// Logique de signature reutilisable — utilisee par la signature simple ET la signature groupee.
+// Retourne le resultat en cas de succes, ou lance une erreur avec { status, message }.
+async function effectuerSignature(document_id, user_id, nom_signataire, cle_privee) {
+    const [assignedRows] = await db.query(
+        'SELECT * FROM document_signers WHERE document_id = ? AND user_id = ?',
+        [document_id, user_id]
+    );
+    if (assignedRows.length === 0) throw { status: 403, message: "Vous n'etes pas assigne a ce document." };
+    if (assignedRows[0].statut === 'signe') throw { status: 400, message: "Vous avez deja signe ce document." };
+    if (assignedRows[0].statut === 'refuse') throw { status: 400, message: "Vous avez deja refuse ce document." };
+
+    const [docRows] = await db.query('SELECT * FROM documents WHERE id = ?', [document_id]);
+    if (docRows.length === 0) throw { status: 404, message: "Document introuvable." };
+    const doc = docRows[0];
+
+    if (doc.ordre_obligatoire) {
+        const monOrdre = assignedRows[0].ordre;
+        const [precedents] = await db.query(
+            'SELECT * FROM document_signers WHERE document_id = ? AND ordre < ? AND statut = "en_attente"',
+            [document_id, monOrdre]
+        );
+        if (precedents.length > 0) throw { status: 403, message: "Ce n'est pas encore votre tour de signer." };
+    }
+
+    // Hash the PDF BEFORE adding the stamp
+    const pdfPath = path.join(__dirname, '../uploads/', doc.fichier_pdf);
+    const pdfHash = calculerHashPDF(pdfPath);
+    console.log('[SIGN] PDF hash before stamp:', pdfHash);
+
+    // Sign: include PDF hash in the signed content
+    const contenuASignier = `document_id:${document_id}|titre:${doc.titre}|signe_par:${user_id}|pdf_hash:${pdfHash}`;
+    const signatureNumerique = signerDocument(contenuASignier, cle_privee);
+    const horodatage = creerHorodatage(signatureNumerique);
+
+    const [result] = await db.query(
+        `INSERT INTO signatures (document_id, user_id, nom_signataire, statut, signature_numerique, horodatage_date, horodatage_empreinte, pdf_hash)
+         VALUES (?, ?, ?, 'Signe', ?, ?, ?, ?)`,
+        [document_id, user_id, nom_signataire, signatureNumerique, horodatage.date, horodatage.empreinte, pdfHash]
+    );
+    const signatureId = result.insertId;
+
+    await db.query(
+        'UPDATE document_signers SET statut = "signe", date_signature = NOW() WHERE document_id = ? AND user_id = ?',
+        [document_id, user_id]
+    );
+
+    const [pending] = await db.query(
+        'SELECT COUNT(*) as cnt FROM document_signers WHERE document_id = ? AND statut = "en_attente"',
+        [document_id]
+    );
+    if (pending[0].cnt === 0) {
+        await db.query('UPDATE documents SET statut = "signe" WHERE id = ?', [document_id]);
+    }
+
+    // Add stamp AFTER computing the hash
+    if (doc.fichier_pdf) {
+        try { await tamponnerPDF(doc.fichier_pdf, nom_signataire, horodatage, signatureId); }
+        catch (pdfErr) { console.error('Erreur tampon PDF:', pdfErr.message); }
+    }
+
+    syncToRailway(signatureId, document_id, user_id, nom_signataire, signatureNumerique, horodatage, pdfHash);
+
+    return {
+        message: "Document signe avec succes.",
+        horodatage,
+        signature_id: signatureId,
+        verify_url: `https://gct-backend-production.up.railway.app/api/verify/${signatureId}`
+    };
 }
 
 // POST /api/signatures
@@ -113,75 +195,37 @@ router.post('/', verifierRole('responsable'), async (req, res) => {
     }
 
     try {
-        const [assignedRows] = await db.query(
-            'SELECT * FROM document_signers WHERE document_id = ? AND user_id = ?',
-            [document_id, user_id]
-        );
-        if (assignedRows.length === 0) return res.status(403).json({ message: "Vous n'etes pas assigne a ce document." });
-        if (assignedRows[0].statut === 'signe') return res.status(400).json({ message: "Vous avez deja signe ce document." });
-
-        const [docRows] = await db.query('SELECT * FROM documents WHERE id = ?', [document_id]);
-        if (docRows.length === 0) return res.status(404).json({ message: "Document introuvable." });
-        const doc = docRows[0];
-
-        if (doc.ordre_obligatoire) {
-            const monOrdre = assignedRows[0].ordre;
-            const [precedents] = await db.query(
-                'SELECT * FROM document_signers WHERE document_id = ? AND ordre < ? AND statut = "en_attente"',
-                [document_id, monOrdre]
-            );
-            if (precedents.length > 0) return res.status(403).json({ message: "Ce n'est pas encore votre tour de signer." });
-        }
-
-        // Hash the PDF BEFORE adding the stamp
-        const pdfPath = path.join(__dirname, '../uploads/', doc.fichier_pdf);
-        const pdfHash = calculerHashPDF(pdfPath);
-        console.log('[SIGN] PDF hash before stamp:', pdfHash);
-
-        // Sign: include PDF hash in the signed content
-        const contenuASignier = `document_id:${document_id}|titre:${doc.titre}|signe_par:${user_id}|pdf_hash:${pdfHash}`;
-        const signatureNumerique = signerDocument(contenuASignier, cle_privee);
-        const horodatage = creerHorodatage(signatureNumerique);
-
-        const [result] = await db.query(
-            `INSERT INTO signatures (document_id, user_id, nom_signataire, statut, signature_numerique, horodatage_date, horodatage_empreinte, pdf_hash)
-             VALUES (?, ?, ?, 'Signe', ?, ?, ?, ?)`,
-            [document_id, user_id, nom_signataire, signatureNumerique, horodatage.date, horodatage.empreinte, pdfHash]
-        );
-        const signatureId = result.insertId;
-
-        await db.query(
-            'UPDATE document_signers SET statut = "signe", date_signature = NOW() WHERE document_id = ? AND user_id = ?',
-            [document_id, user_id]
-        );
-
-        const [pending] = await db.query(
-            'SELECT COUNT(*) as cnt FROM document_signers WHERE document_id = ? AND statut = "en_attente"',
-            [document_id]
-        );
-        if (pending[0].cnt === 0) {
-            await db.query('UPDATE documents SET statut = "signe" WHERE id = ?', [document_id]);
-        }
-
-        // Add stamp AFTER computing the hash
-        if (doc.fichier_pdf) {
-            try { await tamponnerPDF(doc.fichier_pdf, nom_signataire, horodatage, signatureId); }
-            catch (pdfErr) { console.error('Erreur tampon PDF:', pdfErr.message); }
-        }
-
-        syncToRailway(signatureId, document_id, user_id, nom_signataire, signatureNumerique, horodatage, pdfHash);
-
-        res.status(201).json({
-            message: "Document signe avec succes.",
-            horodatage,
-            signature_id: signatureId,
-            verify_url: `https://gct-backend-production.up.railway.app/api/verify/${signatureId}`
-        });
-
+        const resultat = await effectuerSignature(document_id, user_id, nom_signataire, cle_privee);
+        res.status(201).json(resultat);
     } catch (erreur) {
         console.error('Erreur signature:', erreur);
-        res.status(500).json({ message: "Erreur : " + erreur.message });
+        const status = erreur.status || 500;
+        res.status(status).json({ message: erreur.message || ("Erreur : " + erreur.message) });
     }
+});
+
+// POST /api/signatures/bulk — signature groupee : signe plusieurs documents avec la meme cle privee
+router.post('/bulk', verifierRole('responsable'), async (req, res) => {
+    const { document_ids, user_id, nom_signataire, cle_privee } = req.body;
+    if (!Array.isArray(document_ids) || document_ids.length === 0 || !user_id || !nom_signataire || !cle_privee) {
+        return res.status(400).json({ message: "Champs manquants." });
+    }
+
+    const resultats = [];
+    for (const document_id of document_ids) {
+        try {
+            const r = await effectuerSignature(document_id, user_id, nom_signataire, cle_privee);
+            resultats.push({ document_id, success: true, ...r });
+        } catch (erreur) {
+            resultats.push({ document_id, success: false, message: erreur.message || "Erreur inconnue." });
+        }
+    }
+
+    const succes = resultats.filter(r => r.success).length;
+    res.status(200).json({
+        message: `${succes}/${document_ids.length} document(s) signe(s) avec succes.`,
+        resultats
+    });
 });
 
 // POST /api/signatures/refuser

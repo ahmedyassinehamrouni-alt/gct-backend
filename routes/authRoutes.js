@@ -136,4 +136,17 @@ router.get('/users/responsables', async (req, res) => {
         res.status(500).json({ message: "Erreur du serveur." });
     }
 });
+// GET /api/users — liste de tous les utilisateurs (pour le filtre "auteur")
+router.get('/users', async (req, res) => {
+    try {
+        const [users] = await db.query(
+            "SELECT id, nom, prenom, role FROM users ORDER BY nom ASC"
+        );
+        res.json(users);
+    } catch (erreur) {
+        console.error(erreur);
+        res.status(500).json({ message: "Erreur du serveur." });
+    }
+});
+
 module.exports = router;

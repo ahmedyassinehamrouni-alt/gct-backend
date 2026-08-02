@@ -43,13 +43,46 @@ router.post('/', upload.single('fichier_pdf'), async (req, res) => {
 });
 
 // GET /api/documents
+// Filtres disponibles :
+//   recherche      -> titre LIKE %...%
+//   filtre=waiting_on_me  (necessite user_id) -> documents ou c'est le tour de user_id de signer
+//   filtre=created_by_me  (necessite user_id) -> documents crees par user_id
+//   auteur_id      -> documents crees par un auteur precis
+//   date_debut / date_fin -> plage sur date_creation (format YYYY-MM-DD)
 router.get('/', async (req, res) => {
-    const { recherche } = req.query;
+    const { recherche, filtre, user_id, auteur_id, date_debut, date_fin } = req.query;
     try {
-        let sql = `SELECT documents.*, users.nom AS auteur_nom, users.prenom AS auteur_prenom
-                   FROM documents JOIN users ON documents.user_id = users.id`;
-        let params = [];
-        if (recherche) { sql += ' WHERE documents.titre LIKE ?'; params.push('%' + recherche + '%'); }
+        let sql, params = [];
+
+        if (filtre === 'waiting_on_me') {
+            if (!user_id) return res.status(400).json({ message: "user_id requis pour ce filtre." });
+            sql = `SELECT DISTINCT documents.*, users.nom AS auteur_nom, users.prenom AS auteur_prenom
+                   FROM documents
+                   JOIN users ON documents.user_id = users.id
+                   JOIN document_signers ds ON ds.document_id = documents.id
+                   WHERE ds.user_id = ? AND ds.statut = 'en_attente' AND documents.statut = 'en_attente'
+                   AND (
+                       documents.ordre_obligatoire = 0
+                       OR NOT EXISTS (
+                           SELECT 1 FROM document_signers ds2
+                           WHERE ds2.document_id = documents.id AND ds2.ordre < ds.ordre AND ds2.statut != 'signe'
+                       )
+                   )`;
+            params.push(user_id);
+        } else {
+            sql = `SELECT documents.*, users.nom AS auteur_nom, users.prenom AS auteur_prenom
+                   FROM documents JOIN users ON documents.user_id = users.id WHERE 1=1`;
+            if (filtre === 'created_by_me') {
+                if (!user_id) return res.status(400).json({ message: "user_id requis pour ce filtre." });
+                sql += ' AND documents.user_id = ?'; params.push(user_id);
+            }
+        }
+
+        if (recherche) { sql += ' AND documents.titre LIKE ?'; params.push('%' + recherche + '%'); }
+        if (auteur_id) { sql += ' AND documents.user_id = ?'; params.push(auteur_id); }
+        if (date_debut) { sql += ' AND documents.date_creation >= ?'; params.push(date_debut + ' 00:00:00'); }
+        if (date_fin) { sql += ' AND documents.date_creation <= ?'; params.push(date_fin + ' 23:59:59'); }
+
         sql += ' ORDER BY documents.date_creation DESC';
         const [documents] = await db.query(sql, params);
         res.json(documents);
